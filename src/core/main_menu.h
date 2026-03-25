@@ -4,7 +4,6 @@
 #include <MenuItemInterface.h>
 
 #include "menu_items/BleMenu.h"
-#include "menu_items/Bw16Menu.h"
 #include "menu_items/ClockMenu.h"
 #include "menu_items/ConfigMenu.h"
 #include "menu_items/ConnectMenu.h"
@@ -38,7 +37,6 @@ public:
     RFMenu rfMenu;
     ScriptsMenu scriptsMenu;
     WifiMenu wifiMenu;
-    Bw16Menu bw16Menu;
 #if !defined(LITE_VERSION)
     LoRaMenu loraMenu;
     EthernetMenu ethernetMenu;
