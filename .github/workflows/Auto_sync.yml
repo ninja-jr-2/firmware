@@ -14,8 +14,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           token: ${{ secrets.SYNC_PAT }}
           fetch-depth: 0
@@ -64,7 +62,6 @@ jobs:
       - name: Create releases for new tags
         env:
           GITHUB_TOKEN: ${{ secrets.SYNC_PAT }}
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         run: |
           if ! command -v gh &> /dev/null; then
             type -p curl >/dev/null || sudo apt install curl -y
