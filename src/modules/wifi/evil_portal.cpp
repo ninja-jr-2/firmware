@@ -13,7 +13,7 @@ EvilPortal::EvilPortal(
     String tssid, uint8_t channel, bool deauth, bool verifyPwd, bool autoMode, bool backgroundMode
 )
     : apName(tssid), _channel(channel), _deauth(deauth), _verifyPwd(verifyPwd), _autoMode(autoMode),
-      _backgroundMode(backgroundMode), webServer(80) {
+      _backgroundMode(backgroundMode), webServer(80), _launchTime(millis()) {
     
     _originalWifiMode = WiFi.getMode();
     _wifiWasConnected = (WiFi.status() == WL_CONNECTED);
@@ -369,6 +369,25 @@ bool EvilPortal::hasRecentActivity() {
     return (millis() - _lastActivityTime < 5000);
 }
 
+bool EvilPortal::hasRecentPageView() {
+    return (millis() - _lastPageViewTime < 30000);
+}
+
+void EvilPortal::recordPageView() {
+    _lastPageViewTime = millis();
+}
+
+bool EvilPortal::shouldTerminate() {
+    unsigned long currentTime = millis();
+    unsigned long elapsed = currentTime - _launchTime;
+    
+    if (_durationExtended) {
+        return elapsed > (_extendedDurationSec * 1000);
+    } else {
+        return elapsed > (_baseDurationSec * 1000);
+    }
+}
+
 void EvilPortal::checkAndExtendDuration() {
     if (_durationExtended) return;
     
@@ -600,6 +619,7 @@ void EvilPortal::loadDefaultHtml() {
 }
 
 void EvilPortal::portalController(AsyncWebServerRequest *request) {
+    recordPageView();
     if (isDefaultHtml) request->send(200, "text/html", htmlPage);
     else { request->send(*fsHtmlFile, htmlFileName, "text/html"); }
 }
