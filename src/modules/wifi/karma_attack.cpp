@@ -254,7 +254,6 @@ String SSIDDatabase::getSSID(size_t index) {
 }
 
 std::vector<String> SSIDDatabase::getAllSSIDs() {
-    // Intentionally disabled to avoid loading the whole SSID database into RAM.
     return {};
 }
 
@@ -762,20 +761,16 @@ static void destroyActivePortal() {
 #define pendingPortals (state().pendingPortals)
 
 void forceFullRedraw() {
-    // Completely clear the screen
     tft.fillScreen(bruceConfig.bgColor);
     tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
     tft.setTextSize(FP);
 
-    // Force a full refresh of the display
     tft.setCursor(0, 0);
     tft.fillRect(0, 0, tftWidth, tftHeight, bruceConfig.bgColor);
 
-    // Small delay to ensure display processes the clear
     delay(50);
 }
 
-// Helper: Generate clean display name from file path
 String getDisplayName(const String &fullPath, bool isSD) {
     String prefix = isSD ? "[SD] " : "[FS] ";
     String filename = fullPath.substring(fullPath.lastIndexOf('/') + 1);
@@ -783,7 +778,6 @@ String getDisplayName(const String &fullPath, bool isSD) {
     return prefix + filename;
 }
 
-// Helper: Generate unique portal ID for file naming
 String generatePortalId(const String &templateName) {
     static int counter = 0;
     String safeName = templateName;
@@ -803,7 +797,6 @@ String generatePortalId(const String &templateName) {
     return safeName + "_" + String(instance);
 }
 
-// Save captured portal credentials to SD/LittleFS
 void savePortalCredentials(
     const String &ssid, const String &identifier, const String &password, const String &mac, uint8_t channel,
     const String &templateName, const String &portalId
@@ -893,7 +886,6 @@ void addMACToCache(const String &mac) {
     xRingbufferSend(macRingBuffer, mac.c_str(), mac.length() + 1, pdMS_TO_TICKS(100));
 }
 
-// Generate client fingerprint from probe request IEs - defeats MAC randomization
 uint32_t generateClientFingerprint(const uint8_t *frame, int len) {
     uint32_t hash = 5381;
     int pos = 24;
@@ -1699,7 +1691,6 @@ void checkCloneAttackOpportunities() {
     }
 }
 
-// Background portal management with channel locking
 void checkPortals() {
     if (karmaPaused) return;
     unsigned long now = millis();
@@ -1714,6 +1705,21 @@ void checkPortals() {
         destroyActivePortal();
         lastPortalHeartbeat = now;
         return;
+    }
+
+    if (activePortal->instance != nullptr) {
+        activePortal->instance->checkAndExtendDuration();
+        
+        unsigned long effectiveDuration = activePortal->duration;
+        if (activePortal->instance->hasRecentActivity()) {
+            effectiveDuration = attackConfig.extendedDuration;
+        }
+        
+        if ((now - activePortal->launchTime) > effectiveDuration) {
+            destroyActivePortal();
+            lastPortalHeartbeat = now;
+            return;
+        }
     }
 
     if (channl != activePortal->channel - 1) {
@@ -1742,18 +1748,12 @@ void checkPortals() {
     lastPortalHeartbeat = now;
 }
 
-// Launch a portal in background mode (no UI)
 void launchBackgroundPortal(const String &ssid, uint8_t channel, const String &templateName) {
     if (activePortal != nullptr) return;
     if (ssid.isEmpty() || ssid == "*WILDCARD*") return;
 
-    // esp_wifi_set_promiscuous(false);
-    // esp_wifi_set_promiscuous_rx_cb(nullptr);
-
     BackgroundPortal *portal = new (std::nothrow) BackgroundPortal();
     if (portal == nullptr) {
-        // esp_wifi_set_promiscuous(true);
-        // esp_wifi_set_promiscuous_rx_cb(probe_sniffer);
         return;
     }
     portal->ssid = ssid;
@@ -1767,10 +1767,11 @@ void launchBackgroundPortal(const String &ssid, uint8_t channel, const String &t
     portal->instance = new (std::nothrow) EvilPortal(ssid, channel, false, false, true, true);
     if (portal->instance == nullptr) {
         delete portal;
-        // esp_wifi_set_promiscuous(true);
-        // esp_wifi_set_promiscuous_rx_cb(probe_sniffer);
         return;
     }
+
+    portal->instance->setBaseDuration(attackConfig.baseDuration / 1000);
+    portal->instance->setExtendedDuration(attackConfig.extendedDuration / 1000);
 
     activePortal = portal;
     activePortalChannel = channel;
@@ -2544,7 +2545,26 @@ void karma_setup() {
         displayError("Karma alloc failed", true);
         return;
     }
-    // Stop WebUI before setting WiFi mode for karma attack
+
+    wifi_mode_t mode;
+    esp_err_t err = esp_wifi_get_mode(&mode);
+    
+    if (err == ESP_ERR_WIFI_NOT_INIT) {
+        drawMainBorderWithTitle("ENHANCED KARMA ATK");
+        displayTextLine("Starting WiFi...");
+        delay(500);
+        
+        WiFi.mode(WIFI_MODE_APSTA);
+        delay(100);
+        
+        displayTextLine("WiFi started!");
+        delay(500);
+    } else if (err == ESP_OK) {
+        drawMainBorderWithTitle("ENHANCED KARMA ATK");
+        displayTextLine("WiFi ready");
+        delay(500);
+    }
+
     cleanlyStopWebUiForWiFiFeature();
     static bool isInitialized = false;
     if (isInitialized) {
@@ -2556,7 +2576,6 @@ void karma_setup() {
     esp_wifi_set_promiscuous_rx_cb(nullptr);
     esp_wifi_set_promiscuous(false);
 
-    // Force full screen clear on entry
     forceFullRedraw();
 
     returnToMenu = false;
@@ -2622,7 +2641,6 @@ void karma_setup() {
     }
     if (storageAvailable && !Fs->exists("/ProbeData")) Fs->mkdir("/ProbeData");
 
-    // Force another full clear before showing main screen
     forceFullRedraw();
     drawMainBorderWithTitle("ENHANCED KARMA ATK");
     tft.setTextSize(FP);
@@ -2652,6 +2670,8 @@ void karma_setup() {
     attackConfig.fastTierDuration = 15000;
     attackConfig.cloneDuration = 90000;
     attackConfig.maxCloneNetworks = 2;
+    attackConfig.baseDuration = 15000;
+    attackConfig.extendedDuration = 60000;
 
     handshakeCaptureEnabled = false;
 
@@ -2712,7 +2732,6 @@ void karma_setup() {
         }
         if (attackConfig.enableBeaconing && !karmaPaused) sendBeaconFrames();
         if (!karmaPaused) {
-            // if (!portalIsActive())
             {
                 processQueuedProbeEvents();
                 processResponseQueue();
@@ -3320,7 +3339,6 @@ void karma_setup() {
 
             loopOptions(options);
 
-            // Force full screen redraw after menu returns
             forceFullRedraw();
             drawMainBorderWithTitle("ENHANCED KARMA ATK");
             tft.setTextSize(FP);
