@@ -53,4 +53,8 @@ void beaconAttack();
 
 void deauthFloodAttack();
 
+void enhancedBroadcastDeauth();
+
+void enhancedDeviceDeauth();
+
 #endif
