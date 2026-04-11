@@ -1,7 +1,12 @@
 #include "ble_common.h"
+#include "ble_spam.h"
 #include "core/mykeyboard.h"
 #include "core/utils.h"
 #include "esp_mac.h"
+#if !defined(LITE_VERSION)
+#include "apple_spam.h"
+#endif
+
 #define SERVICE_UUID "1bc68b2a-f3e3-11e9-81b4-2a2ae2dbcce4"
 #define CHARACTERISTIC_RX_UUID "1bc68da0-f3e3-11e9-81b4-2a2ae2dbcce4"
 #define CHARACTERISTIC_TX_UUID "1bc68efe-f3e3-11e9-81b4-2a2ae2dbcce4"
@@ -276,4 +281,34 @@ void ble_test() {
     disPlayBLESend();
 
     printf("Quit ble test\n");
+}
+
+// Spam update function - called from main loop
+void updateBLESpam() {
+    // Legacy Apple spam (SourApple/AppleJuice) - available on all devices
+    if (isLegacyAppleSpamRunning()) {
+        updateLegacyAppleSpam();
+    }
+    
+#if !defined(LITE_VERSION)
+    // Modern Apple spam (AirPods, AppleTV, etc.) - only on high-end devices
+    if (isAppleSpamRunning()) {
+        updateAppleSpam();
+    }
+#endif
+    
+    // Samsung spam
+    if (isSamsungSpamRunning()) {
+        updateSamsungSpam();
+    }
+    
+    // Google FastPair spam
+    if (isGoogleSpamRunning()) {
+        updateGoogleSpam();
+    }
+    
+    // Windows SwiftPair spam
+    if (isWindowsSpamRunning()) {
+        updateWindowsSpam();
+    }
 }
