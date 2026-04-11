@@ -19,4 +19,6 @@ void quickAppleSpam(int payloadIndex);
 bool isAppleSpamRunning();
 const char* getApplePayloadName(int index);
 int getApplePayloadCount();
+void updateAppleSpam();
+
 #endif
