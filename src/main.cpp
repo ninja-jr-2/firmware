@@ -11,6 +11,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include "ble_common.h"
 io_expander ioExpander;
 BruceConfig bruceConfig;
 BruceConfigPins bruceConfigPins;
@@ -61,10 +62,6 @@ void __attribute__((weak)) taskInputHandler(void *parameter) {
     auto timer = millis();
     while (true) {
         checkPowerSaveTime();
-        // Sometimes this task run 2 or more times before looptask,
-        // and navigation gets stuck, the idea here is run the input detection
-        // if AnyKeyPress is false, or rerun if it was not renewed within 75ms (arbitrary)
-        // because AnyKeyPress will be true if didn´t passed through a check(bool var)
         if (!AnyKeyPress || millis() - timer > 75) {
             NextPress = false;
             PrevPress = false;
@@ -202,8 +199,6 @@ void setup_gpio() {
         initCC1101once(&sdcardSPI); // (ARDUINO_M5STACK_CARDPUTER) and (ESP32S3DEVKITC1) and devices that
                                     // share CC1101 pin with only SDCard
     else initCC1101once(NULL);
-    // (ARDUINO_M5STICK_C_PLUS) || (ARDUINO_M5STICK_C_PLUS2) and others that doesn´t share SPI with
-    // other devices (need to change it when Bruce board comes to shore)
 }
 
 /*********************************************************************
@@ -238,7 +233,7 @@ void boot_screen() {
     tft.setTextSize(FM);
     tft.drawCentreString(
         "PREDATORY FIRMWARE", tftWidth / 2, tftHeight + 2, 1
-    ); // will draw outside the screen on non touch devices
+    );
 }
 
 /*********************************************************************
@@ -248,7 +243,6 @@ void boot_screen() {
 void boot_screen_anim() {
     boot_screen();
     int i = millis();
-    // checks for boot.jpg in SD and LittleFS for customization
     int boot_img = 0;
     bool drawn = false;
     if (sdcardMounted) {
@@ -257,11 +251,10 @@ void boot_screen_anim() {
     }
     if (boot_img == 0 && LittleFS.exists("/boot.jpg")) boot_img = 2;
     else if (boot_img == 0 && LittleFS.exists("/boot.gif")) boot_img = 4;
-    if (bruceConfig.theme.boot_img) boot_img = 5; // override others
+    if (bruceConfig.theme.boot_img) boot_img = 5;
 
-    tft.drawPixel(0, 0, 0);       // Forces back communication with TFT, to avoid ghosting
-                                  // Start image loop
-    while (millis() < i + 7000) { // boot image lasts for 5 secs
+    tft.drawPixel(0, 0, 0);
+    while (millis() < i + 7000) {
         if ((millis() - i > 2000) && !drawn) {
             tft.fillRect(0, 45, tftWidth, tftHeight - 45, bruceConfig.bgColor);
             if (boot_img > 0 && !drawn) {
@@ -289,7 +282,7 @@ void boot_screen_anim() {
                     drawImg(LittleFS, "/boot.gif", 0, 0, true, 3600);
                     Serial.println("Image from LittleFS");
                 }
-                tft.drawPixel(0, 0, 0); // Forces back communication with TFT, to avoid ghosting
+                tft.drawPixel(0, 0, 0);
             }
             drawn = true;
         }
@@ -320,7 +313,7 @@ void boot_screen_anim() {
                 bruceConfig.priColor
             );
 #endif
-        if (check(AnyKeyPress)) // If any key or M5 key is pressed, it'll jump the boot screen
+        if (check(AnyKeyPress))
         {
             tft.fillScreen(bruceConfig.bgColor);
             delay(10);
@@ -328,7 +321,6 @@ void boot_screen_anim() {
         }
     }
 
-    // Clear splashscreen
     tft.fillScreen(bruceConfig.bgColor);
 }
 
@@ -386,16 +378,13 @@ void init_led() {
  **  Play sound or tone depending on device hardware
  *********************************************************************/
 void startup_sound() {
-    if (bruceConfig.soundEnabled == 0) return; // if sound is disabled, do not play sound
+    if (bruceConfig.soundEnabled == 0) return;
 #if !defined(LITE_VERSION)
 #if defined(BUZZ_PIN)
-    // Bip M5 just because it can. Does not bip if splashscreen is bypassed
     _tone(5000, 50);
     delay(200);
     _tone(5000, 50);
-    /*  2fix: menu infinite loop */
 #elif defined(HAS_NS4168_SPKR)
-    // play a boot sound
     if (bruceConfig.theme.boot_sound) {
         playAudioFile(bruceConfig.themeFS(), bruceConfig.getThemeItemImg(bruceConfig.theme.paths.boot_sound));
     } else if (SD.exists("/boot.wav")) {
@@ -414,7 +403,7 @@ void startup_sound() {
 void setup() {
     Serial.setRxBufferSize(
         SAFE_STACK_BUFFER_SIZE / 4
-    ); // Must be invoked before Serial.begin(). Default is 256 chars
+    );
     Serial.begin(115200);
 
     log_d("Total heap: %d", ESP.getHeapSize());
@@ -425,19 +414,17 @@ void setup() {
     log_d("Total PSRAM: %d", ESP.getPsramSize());
     log_d("Free PSRAM: %d", ESP.getFreePsram());
 
-    // declare variables
     prog_handler = 0;
     sdcardMounted = false;
     wifiConnected = false;
     BLEConnected = false;
-    bruceConfig.bright = 100; // theres is no value yet
+    bruceConfig.bright = 100;
     bruceConfigPins.rotation = ROTATION;
     setup_gpio();
 #if defined(HAS_SCREEN)
     tft.init();
     tft.setRotation(bruceConfigPins.rotation);
     tft.fillScreen(TFT_BLACK);
-    // bruceConfig is not read yet.. just to show something on screen due to long boot time
     tft.setTextColor(TFT_PURPLE, TFT_BLACK);
     tft.drawCentreString("Booting", tft.width() / 2, tft.height() / 2, 1);
 #else
@@ -448,37 +435,31 @@ void setup() {
     init_clock();
     init_led();
 
-    options.reserve(20); // preallocate some options space to avoid fragmentation
+    options.reserve(20);
 
-    // Set WiFi country to avoid warnings and ensure max power
     const wifi_country_t country = {
         .cc = "US",
         .schan = 1,
         .nchan = 14,
 #ifdef CONFIG_ESP_PHY_MAX_TX_POWER
-        .max_tx_power = CONFIG_ESP_PHY_MAX_TX_POWER, // 20
+        .max_tx_power = CONFIG_ESP_PHY_MAX_TX_POWER,
 #endif
         .policy = WIFI_COUNTRY_POLICY_MANUAL
     };
 
-    esp_wifi_set_max_tx_power(80); // 80 translates to 20dBm
+    esp_wifi_set_max_tx_power(80);
     esp_wifi_set_country(&country);
 
-    // Some GPIO Settings (such as CYD's brightness control must be set after tft and sdcard)
     _post_setup_gpio();
-    // end of post gpio begin
 
-    // #ifndef USE_TFT_eSPI_TOUCH
-    // This task keeps running all the time, will never stop
     xTaskCreate(
-        taskInputHandler,              // Task function
-        "InputHandler",                // Task Name
-        INPUT_HANDLER_TASK_STACK_SIZE, // Stack size
-        NULL,                          // Task parameters
-        2,                             // Task priority (0 to 3), loopTask has priority 2.
-        &xHandle                       // Task handle (not used)
+        taskInputHandler,
+        "InputHandler",
+        INPUT_HANDLER_TASK_STACK_SIZE,
+        NULL,
+        2,
+        &xHandle
     );
-    // #endif
 #if defined(HAS_SCREEN)
     bruceConfig.openThemeFile(bruceConfig.themeFS(), bruceConfig.themePath, false);
     if (!bruceConfig.instantBoot) {
@@ -488,16 +469,15 @@ void setup() {
     if (bruceConfig.wifiAtStartup) {
         log_i("Loading Wifi at Startup");
         xTaskCreate(
-            wifiConnectTask,   // Task function
-            "wifiConnectTask", // Task Name
-            4096,              // Stack size
-            NULL,              // Task parameters
-            2,                 // Task priority (0 to 3), loopTask has priority 2.
-            NULL               // Task handle (not used)
+            wifiConnectTask,
+            "wifiConnectTask",
+            4096,
+            NULL,
+            2,
+            NULL
         );
     }
 #endif
-    //  start a task to handle serial commands while the webui is running
     startSerialCommandsHandlerTask(true);
 
     wakeUpScreen();
@@ -512,6 +492,9 @@ void setup() {
  **********************************************************************/
 #if defined(HAS_SCREEN)
 void loop() {
+    // Update BLE spam state machines (non-blocking, only when active)
+    updateBLESpam();
+    
 #if !defined(LITE_VERSION) && !defined(DISABLE_INTERPRETER)
     if (interpreter_state > 0) {
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -524,7 +507,7 @@ void loop() {
             Serial.println("Exiting interpreter...");
         }
         if (interpreter_state == -1) { interpreterTaskHandler = NULL; }
-        previousMillis = millis(); // ensure that will not dim screen when get back to menu
+        previousMillis = millis();
     }
 #endif
     tft.fillScreen(bruceConfig.bgColor);
@@ -550,7 +533,6 @@ void loop() {
         "At your command:"
     );
 
-    // Enable navigation through webUI
     tft.fillScreen(bruceConfig.bgColor);
     mainMenu.begin();
     vTaskDelay(10 / portTICK_PERIOD_MS);
