@@ -4,13 +4,20 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <NimBLEAdvertisedDevice.h>
+#include <NimBLEBeacon.h>
+#include <NimBLEServer.h>
+#include <NimBLEUtils.h>
 
 enum EBLEPayloadType { Microsoft, SourApple, AppleJuice, Samsung, Google };
 
 void generateRandomMac(uint8_t *mac);
 void executeSpam(EBLEPayloadType type, String customName = "");
 void executeCustomSpam(String spamName);
-void ibeacon(const char *DeviceName, const char *BEACON_UUID, int ManufacturerId);
+void ibeacon(
+    const char *DeviceName = "Bruce iBeacon",
+    const char *BEACON_UUID = "8ec76ea3-6668-48da-9866-75be8bc86f4d",
+    int ManufacturerId = 0x4C00
+);
 void aj_adv(int ble_choice);
 void legacySubMenu();
 void spamMenu();
