@@ -28,4 +28,7 @@ void ble_scan();
 
 void disPlayBLESend();
 
+// Spam update function
+void updateBLESpam();
+
 #endif
