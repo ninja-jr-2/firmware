@@ -773,7 +773,7 @@ void ibeacon(const char *DeviceName, const char *BEACON_UUID, int ManufacturerId
     esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, MAX_TX_POWER);
 
     NimBLEBeacon myBeacon;
-    myBeacon.setManufacturerId(0x4c00);
+    myBeacon.setManufacturerId(ManufacturerId);
     myBeacon.setMajor(5);
     myBeacon.setMinor(88);
     myBeacon.setSignalPower(0xc5);
