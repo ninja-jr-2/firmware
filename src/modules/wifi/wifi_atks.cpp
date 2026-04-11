@@ -40,7 +40,11 @@ enum DeauthPreset {
 static DeauthPreset current_preset = PRESET_NORMAL;
 
 // Device deauth sniffing globals
-static std::vector<uint8_t> sniffed_clients;
+struct ClientInfo {
+    uint8_t mac[6];
+    String name;
+};
+static std::vector<ClientInfo> sniffed_clients;
 static uint8_t sniff_target_bssid[6];
 static volatile bool sniffing_active = false;
 
@@ -862,13 +866,44 @@ static void device_deauth_sniffer(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (client_mac[0] == 0xFF && client_mac[1] == 0xFF) return;
     if (client_mac[0] & 0x01) return;
     
-    // Add to list if not already present
-    for (size_t i = 0; i < sniffed_clients.size(); i += 6) {
-        if (memcmp(&sniffed_clients[i], client_mac, 6) == 0) return;
+    // Try to extract device name from probe request SSID
+    String device_name = "";
+    int pos = 24;
+    while (pos + 1 < len) {
+        uint8_t tag = frame[pos];
+        uint8_t tag_len = frame[pos + 1];
+        if (pos + 2 + tag_len > len) break;
+        
+        // Tag 0x00 is SSID in probe requests/beacons
+        if (tag == 0x00 && tag_len > 0 && tag_len <= 32) {
+            char ssid[33];
+            memcpy(ssid, &frame[pos + 2], tag_len);
+            ssid[tag_len] = '\0';
+            // Only use if it looks like a device name (not empty, not broadcast)
+            if (strlen(ssid) > 0 && ssid[0] != '\0') {
+                device_name = String(ssid);
+            }
+            break;
+        }
+        pos += 2 + tag_len;
+    }
+    
+    // Check if already in list
+    for (size_t i = 0; i < sniffed_clients.size(); i++) {
+        if (memcmp(sniffed_clients[i].mac, client_mac, 6) == 0) {
+            // Update name if we found one and didn't have it before
+            if (device_name.length() > 0 && sniffed_clients[i].name.length() == 0) {
+                sniffed_clients[i].name = device_name;
+            }
+            return;
+        }
     }
     
     // Add new client
-    for (int i = 0; i < 6; i++) sniffed_clients.push_back(client_mac[i]);
+    ClientInfo info;
+    memcpy(info.mac, client_mac, 6);
+    info.name = device_name;
+    sniffed_clients.push_back(info);
 }
 
 /***************************************************************************************
@@ -1057,7 +1092,7 @@ void enhancedBroadcastDeauth() {
 
 /***************************************************************************************
 ** function: enhancedDeviceDeauth
-** @brief: Passive sniffing + fingerprinting + targeted deauth
+** @brief: Passive sniffing + fingerprinting + targeted deauth with dynamic UI
 ***************************************************************************************/
 void enhancedDeviceDeauth() {
     if (!wifi_atk_setWifi()) return;
@@ -1135,9 +1170,9 @@ void enhancedDeviceDeauth() {
     while (millis() - start < 10000) {
         if (check(EscPress)) break;
         
-        int current_count = sniffed_clients.size() / 6;
+        int current_count = sniffed_clients.size();
         if (current_count != last_count) {
-            tft.fillRect(20, 120, 150, 20, TFT_BLACK);
+            tft.fillRect(20, 120, 200, 20, TFT_BLACK);
             tft.setCursor(20, 120);
             tft.print("Found: " + String(current_count) + " clients");
             last_count = current_count;
@@ -1157,27 +1192,54 @@ void enhancedDeviceDeauth() {
     
     // Display found clients
     drawMainBorderWithTitle("Device Deauth");
-    padprintln("Found " + String(sniffed_clients.size() / 6) + " devices");
+    padprintln("Found " + String(sniffed_clients.size()) + " devices");
     
     // Build client list for selection
     std::vector<String> client_list;
-    for (size_t i = 0; i < sniffed_clients.size(); i += 6) {
+    for (size_t i = 0; i < sniffed_clients.size(); i++) {
         char mac[18];
         snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 sniffed_clients[i], sniffed_clients[i+1], sniffed_clients[i+2],
-                 sniffed_clients[i+3], sniffed_clients[i+4], sniffed_clients[i+5]);
-        client_list.push_back(String(mac));
+                 sniffed_clients[i].mac[0], sniffed_clients[i].mac[1], sniffed_clients[i].mac[2],
+                 sniffed_clients[i].mac[3], sniffed_clients[i].mac[4], sniffed_clients[i].mac[5]);
+        
+        String display_name;
+        if (sniffed_clients[i].name.length() > 0) {
+            display_name = sniffed_clients[i].name + " (" + String(mac) + ")";
+        } else {
+            display_name = String(mac);
+        }
+        client_list.push_back(display_name);
     }
     
+    // Dynamic client selection menu - adapts to screen size
+    int item_height = 25;
+    int start_y = 100;
+    int max_visible = (tftHeight - start_y - 50) / item_height;
+    
+    if (max_visible > (int)client_list.size()) {
+        max_visible = client_list.size();
+    }
+    
+    int scroll_offset = 0;
     int client_selected = 0;
     int client_last = -1;
+    int last_scroll_offset = -1;
+    
     while (true) {
-        if (client_selected != client_last) {
-            tft.fillRect(20, 100, tftWidth - 40, tftHeight - 150, bruceConfig.bgColor);
-            for (int i = 0; i < 5 && client_selected + i < (int)client_list.size(); i++) {
-                int y = 100 + i * 25;
-                if (i == 0) {
-                    tft.fillRect(20, y, tftWidth - 40, 20, TFT_WHITE);
+        bool need_redraw = (client_selected != client_last) || (scroll_offset != last_scroll_offset);
+        
+        if (need_redraw) {
+            // Clear only the list area
+            tft.fillRect(20, start_y - 5, tftWidth - 40, max_visible * item_height + 10, bruceConfig.bgColor);
+            
+            for (int i = 0; i < max_visible; i++) {
+                int idx = scroll_offset + i;
+                if (idx >= (int)client_list.size()) break;
+                
+                int y = start_y + i * item_height;
+                
+                if (idx == client_selected) {
+                    tft.fillRect(20, y, tftWidth - 40, item_height - 3, TFT_WHITE);
                     tft.setTextColor(TFT_BLACK, TFT_WHITE);
                     tft.setCursor(25, y + 5);
                     tft.print("> ");
@@ -1186,22 +1248,51 @@ void enhancedDeviceDeauth() {
                     tft.setCursor(25, y + 5);
                     tft.print("  ");
                 }
-                tft.print(client_list[client_selected + i]);
+                tft.print(client_list[idx]);
             }
+            
+            // Show scroll indicators
+            tft.setTextColor(TFT_CYAN, bruceConfig.bgColor);
+            if (scroll_offset > 0) {
+                tft.setCursor(tftWidth - 25, start_y);
+                tft.print("^");
+            }
+            if (scroll_offset + max_visible < (int)client_list.size()) {
+                tft.setCursor(tftWidth - 25, start_y + (max_visible - 1) * item_height);
+                tft.print("v");
+            }
+            
             client_last = client_selected;
+            last_scroll_offset = scroll_offset;
         }
-        if (check(NextPress)) { client_selected++; if (client_selected >= (int)client_list.size()) client_selected = 0; delay(150); }
-        if (check(PrevPress)) { client_selected--; if (client_selected < 0) client_selected = client_list.size() - 1; delay(150); }
-        if (check(SelPress)) break;
-        if (check(EscPress)) { wifi_atk_unsetWifi(); return; }
+        
+        if (check(NextPress)) {
+            if (client_selected < (int)client_list.size() - 1) {
+                client_selected++;
+                if (client_selected >= scroll_offset + max_visible) {
+                    scroll_offset = client_selected - max_visible + 1;
+                }
+                delay(150);
+            }
+        }
+        else if (check(PrevPress)) {
+            if (client_selected > 0) {
+                client_selected--;
+                if (client_selected < scroll_offset) {
+                    scroll_offset = client_selected;
+                }
+                delay(150);
+            }
+        }
+        else if (check(SelPress)) break;
+        else if (check(EscPress)) { wifi_atk_unsetWifi(); return; }
+        
         delay(50);
     }
     
     // Get selected client MAC
     uint8_t target_client[6];
-    for (int i = 0; i < 6; i++) {
-        target_client[i] = sniffed_clients[client_selected * 6 + i];
-    }
+    memcpy(target_client, sniffed_clients[client_selected].mac, 6);
     
     int packets_per_mac, deauth_delay_ms;
     bool spoofing;
