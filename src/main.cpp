@@ -11,7 +11,7 @@
 #include <functional>
 #include <string>
 #include <vector>
-#include "ble_common.h"
+#include "modules/ble/ble_common.h"
 io_expander ioExpander;
 BruceConfig bruceConfig;
 BruceConfigPins bruceConfigPins;
